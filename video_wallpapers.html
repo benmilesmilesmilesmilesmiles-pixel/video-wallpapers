@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Minimal Video Wallpaper Library</title>
+  <meta name="description" content="Upload, preview and download video wallpapers. Works locally (IndexedDB) or with a simple server backend. Scraping-friendly markup when hosted to a server." />
+  <style>
+    :root{
+      --bg:#0f1115; --card:#0f1720; --muted:#9aa4b2; --accent:#7dd3fc;
+      --glass: rgba(255,255,255,0.04);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg),#05060a);color:#e6eef6}
+    .wrap{max-width:1100px;margin:40px auto;padding:18px}
+    .top{display:flex;gap:18px;align-items:center;justify-content:space-between}
+    h1{font-size:20px;margin:0}
+    p.lead{color:var(--muted);margin:6px 0 0;font-size:13px}
+
+    .panel{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,0.6);display:flex;gap:12px;align-items:center}
+    .uploader{flex:1;min-height:90px;border-radius:10px;padding:12px;border:1px dashed rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:linear-gradient(180deg,rgba(255,255,255,0.01),transparent)}
+    .uploader.dragover{border-color:var(--accent);box-shadow:0 6px 30px rgba(125,211,252,0.05)}
+    input[type=file]{display:none}
+    .btn{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px 12px;border-radius:9px;color:var(--accent);cursor:pointer}
+    .small{font-size:13px;color:var(--muted)}
+
+    .controls{display:flex;gap:8px;align-items:center}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;margin-top:20px}
+    article.card{background:var(--glass);border-radius:10px;padding:10px;overflow:hidden;display:flex;flex-direction:column;gap:8px}
+    .meta{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--muted)}
+    .meta .size{white-space:nowrap}
+    video{width:100%;height:160px;object-fit:cover;border-radius:8px;background:#000}
+
+    .actions{display:flex;gap:8px}
+    a.download{flex:1;text-decoration:none;padding:8px;border-radius:8px;background:linear-gradient(90deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));border:1px solid rgba(255,255,255,0.04);text-align:center;color:var(--accent);font-size:13px}
+    .muted{color:var(--muted);font-size:12px}
+
+    footer{margin-top:22px;color:var(--muted);font-size:13px;text-align:center}
+
+    /* responsive tweaks */
+    @media (max-width:520px){.top{flex-direction:column;align-items:flex-start}.controls{width:100%;justify-content:space-between}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>Wallpaper Vault — Video-only</h1>
+        <p class="lead">Upload short loopable videos as wallpapers. Works locally (no server) or can POST to a backend for public hosting. Markup is scraper-friendly when hosted.</p>
+      </div>
+      <div class="controls">
+        <button id="btn-clean" class="btn" title="Clear local library">Clear local</button>
+        <button id="btn-export-html" class="btn" title="Generate a static gallery HTML that references /uploads/...">Export gallery HTML</button>
+        <button id="btn-export-json" class="btn" title="Download library manifest JSON (metadata)">Export JSON</button>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="panel">
+      <label class="uploader" id="dropzone">
+        <strong>Drop video files here</strong>
+        <div class="small">or <button id="pick" class="btn" style="display:inline-block">Browse</button> • MP4, WebM, MOV (video only)</div>
+        <input id="file" type="file" accept="video/*" multiple />
+      </label>
+    </div>
+
+    <div id="status" style="margin-top:12px;color:var(--muted);font-size:13px"></div>
+
+    <section id="gallery" class="grid" aria-live="polite" style="margin-top:16px"></section>
+
+    <footer>
+      <div class="muted">Tip: to make this site web-scraping friendly when deployed, implement a server endpoint at <code>/api/list</code> that returns JSON array of {filename, url, size, uploadedAt}. The gallery will try that automatically. If not found, the page uses the local IndexedDB library.</div>
+    </footer>
+  </div>
+
+<script>
+// Minimal IndexedDB wrapper for storing files locally when no server available
+const DB_NAME = 'wallpaper-vault';
+const STORE = 'videos';
+let dbPromise = null;
+function openDB(){
+  if(dbPromise) return dbPromise;
+  dbPromise = new Promise((res,rej)=>{
+    const r = indexedDB.open(DB_NAME,1);
+    r.onupgradeneeded = e => {
+      const db = e.target.result;
+      if(!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE,{keyPath:'id',autoIncrement:true});
+    };
+    r.onsuccess = e => res(e.target.result);
+    r.onerror = e => rej(e.target.error);
+  });
+  return dbPromise;
+}
+async function addFileToDB(file,meta={}){
+  const db = await openDB();
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(STORE,'readwrite');
+    const store = tx.objectStore(STORE);
+    const entry = {file, name:file.name, size:file.size, type:file.type, uploadedAt: new Date().toISOString(), meta};
+    const req = store.add(entry);
+    req.onsuccess = ()=>res(req.result);
+    req.onerror = e=>rej(e.target.error);
+  });
+}
+async function listFromDB(){
+  const db = await openDB();
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(STORE,'readonly');
+    const store = tx.objectStore(STORE);
+    const req = store.getAll();
+    req.onsuccess = ()=>res(req.result);
+    req.onerror = e=>rej(e.target.error);
+  });
+}
+async function clearDB(){
+  const db = await openDB();
+  return new Promise((res,rej)=>{
+    const tx = db.transaction(STORE,'readwrite');
+    const store = tx.objectStore(STORE);
+    const req = store.clear();
+    req.onsuccess = ()=>res();
+    req.onerror = e=>rej(e.target.error);
+  });
+}
+
+// UI helpers
+const drop = document.getElementById('dropzone');
+const fileInput = document.getElementById('file');
+const pickBtn = document.getElementById('pick');
+const gallery = document.getElementById('gallery');
+const status = document.getElementById('status');
+const btnClean = document.getElementById('btn-clean');
+const btnExportHTML = document.getElementById('btn-export-html');
+const btnExportJSON = document.getElementById('btn-export-json');
+
+pickBtn.addEventListener('click',()=>fileInput.click());
+fileInput.addEventListener('change',onFiles);
+
+['dragenter','dragover'].forEach(ev=>{
+  drop.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();drop.classList.add('dragover')});
+});
+['dragleave','drop'].forEach(ev=>{
+  drop.addEventListener(ev,e=>{e.preventDefault();e.stopPropagation();drop.classList.remove('dragover')});
+});
+drop.addEventListener('drop', e=>{const dt=e.dataTransfer; if(dt && dt.files) onFiles({target:{files:dt.files}})});
+
+async function onFiles(e){
+  const files = e.target.files;
+  if(!files || files.length===0) return;
+  status.textContent = `Processing ${files.length} file(s)...`;
+  for(const f of files){
+    if(!f.type.startsWith('video')){console.warn('skipping non-video',f.name);continue}
+    // try server upload first
+    try{
+      const serverOk = await tryServerUpload(f);
+      if(!serverOk){
+        await addFileToDB(f);
+      }
+    }catch(err){
+      console.error(err);
+      await addFileToDB(f);
+    }
+  }
+  status.textContent = '';
+  await refresh();
+}
+
+async function tryServerUpload(file){
+  // If a server endpoint /upload accepts multipart/form-data and returns JSON {filename, url}
+  // the page will attempt to POST to it. If it fails (404/ network error) we store locally.
+  try{
+    const form = new FormData();
+    form.append('file', file);
+    // hint header for server — this is optional and can be removed if your server rejects unknown headers
+    const res = await fetch('/upload', {method:'POST', body:form});
+    if(!res.ok) return false;
+    const json = await res.json();
+    console.log('uploaded to server', json);
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
+function humanSize(bytes){
+  if(bytes<1024) return bytes+' B';
+  const k = 1024; const sizes=['KB','MB','GB','TB']; let i=Math.floor(Math.log(bytes)/Math.log(k)); if(i<0) i=0; return (bytes/Math.pow(k,i)).toFixed( i===0?0:1) + ' ' + sizes[i-1];
+}
+
+async function refresh(){
+  gallery.innerHTML = '';
+
+  // First try server list (scraping-friendly mode). If present, use it.
+  try{
+    const res = await fetch('/api/list');
+    if(res.ok){
+      const list = await res.json();
+      if(Array.isArray(list)){
+        renderServerList(list);
+        status.textContent = `Showing ${list.length} items from server (/api/list).`;
+        return;
+      }
+    }
+  }catch(e){/* ignore - fallback to local */}
+
+  // fallback to local IndexedDB library
+  const items = await listFromDB();
+  status.textContent = items.length? `Showing ${items.length} local item(s).` : 'No videos yet — drop some!';
+  for(const it of items){
+    const url = URL.createObjectURL(it.file);
+    const el = makeCard({id:it.id, name:it.name, size:it.size, url, uploadedAt:it.uploadedAt, type:it.type, local:true});
+    gallery.appendChild(el);
+  }
+}
+
+function renderServerList(list){
+  gallery.innerHTML = '';
+  for(const it of list){
+    // expected fields: filename, url, size, uploadedAt
+    const el = makeCard({id:it.filename||it.id, name:it.filename||it.name, size:it.size||0, url:it.url, uploadedAt:it.uploadedAt||'', local:false});
+    gallery.appendChild(el);
+  }
+}
+
+function makeCard({id,name,size,url,uploadedAt,local}){
+  const art = document.createElement('article'); art.className='card';
+  const vid = document.createElement('video'); vid.src = url; vid.muted=true; vid.loop=true; vid.playsInline=true; vid.autoplay=true; vid.controls=true; vid.setAttribute('preload','metadata');
+  // keep videos tiny for faster scrapers by setting poster? not necessary
+  const meta = document.createElement('div'); meta.className='meta';
+  const left = document.createElement('div'); left.innerHTML = `<div style="font-weight:600">${escapeHtml(name)}</div><div class="muted">${uploadedAt?new Date(uploadedAt).toLocaleString() : ''}</div>`;
+  const right = document.createElement('div'); right.className='size'; right.textContent = humanSize(size||0);
+  meta.appendChild(left); meta.appendChild(right);
+
+  const actions = document.createElement('div'); actions.className='actions';
+  // download link — server urls are direct; local uses blob
+  const a = document.createElement('a'); a.className='download'; a.href = url; a.download = name; a.textContent = 'Download';
+  actions.appendChild(a);
+
+  // optionally add a "copy URL" for server items
+  if(!local){
+    const cp = document.createElement('button'); cp.className='btn'; cp.textContent='Copy URL'; cp.addEventListener('click',()=>{
+      navigator.clipboard.writeText(url).then(()=>{status.textContent='URL copied to clipboard'}).catch(()=>status.textContent='Copy failed');
+    }); actions.appendChild(cp);
+  }
+
+  art.appendChild(vid); art.appendChild(meta); art.appendChild(actions);
+  return art;
+}
+
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
+
+// buttons
+btnClean.addEventListener('click', async ()=>{
+  if(!confirm('Clear local library? This removes locally saved uploads only.')) return;
+  await clearDB();
+  await refresh();
+});
+
+btnExportJSON.addEventListener('click', async ()=>{
+  const items = await listFromDB();
+  const manifest = items.map(it=>({id:it.id,name:it.name,size:it.size,type:it.type,uploadedAt:it.uploadedAt}));
+  const blob = new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'wallpapers-manifest.json'; a.click(); URL.revokeObjectURL(url);
+});
+
+btnExportHTML.addEventListener('click', async ()=>{
+  // Generate a static gallery HTML that points to /uploads/filename — useful for scraping after you upload files to server
+  const items = await listFromDB();
+  const rows = items.map(it=>`<article><video src="/uploads/${encodeURIComponent(it.name)}" controls preload="metadata"></video><a href="/uploads/${encodeURIComponent(it.name)}" download>${escapeHtml(it.name)}</a></article>`).join('\n');
+  const html = `<!doctype html>\n<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Wallpapers - static export</title></head><body>\n<h1>Wallpapers</h1>\n<section>\n${rows}\n</section>\n</body></html>`;
+  const blob = new Blob([html],{type:'text/html'});
+  const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href=url; a.download='gallery.html'; a.click(); URL.revokeObjectURL(url);
+});
+
+// initial load
+refresh();
+</script>
+
+<!--
+HOW THIS FILE WORKS & HOW TO HOST (quick notes):
+
+1) CLIENT-ONLY (no server):
+   - Open this file in a browser. When you drop video files they'll be saved to your browser's IndexedDB and will appear in the gallery.
+   - Other visitors to the same file on their machine will NOT see your local uploads — this is a local library.
+   - Use "Export JSON" to get a manifest, or "Export gallery HTML" to generate an HTML template referencing /uploads/<filename> which is useful if you later want to host the files on a server.
+
+2) SERVER-BACKED (scraping friendly):
+   - Implement a server endpoint POST /upload that accepts 'file' multipart/form-data and stores the file under /uploads/<filename>. Return JSON {filename, url}.
+   - Implement GET /api/list that returns a JSON array of objects [{filename, url, size, uploadedAt}, ...].
+   - When deployed this way, the page will automatically fetch /api/list and render items using direct URLs (/uploads/...). These direct URLs are perfect for web-scrapers (they are simple <video> and <a href> tags).
+
+3) SECURITY & NOTES:
+   - This front-end does not enforce authentication. If you need permissioned uploads, add auth to /upload and /api/list on your server.
+   - Use a proper filename sanitiser server-side to avoid collisions and path traversal.
+   - For large video libraries, prefer server storage and pagination on /api/list.
+
+Enjoy — tweak styling and endpoints as you like.
+-->
+
+</body>
+</html>
